@@ -120,15 +120,33 @@ jobs:
         run: |
           export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
           cp ../config/stock-hollywood.config .config
-          # Pin the release string so include/config/kernel.release == the
-          # firmware's uname -r, independent of the CI checkout's git state.
-          base="${TARGET_RELEASE%%-*}"                 # 4.19.325
-          suffix="-${TARGET_RELEASE#*-}"               # -cip128-st12-g143e84087e21
-          echo "base=$base suffix=$suffix"
-          ./scripts/config --file .config --disable LOCALVERSION_AUTO --set-str LOCALVERSION "$suffix"
-          # No module signing key is enforced on this firmware.
-          ./scripts/config --file .config --set-str SYSTEM_TRUSTED_KEYS ""
+          # Reproduce the firmware's `uname -r` exactly, independent of the CI
+          # commit and of whether the tree is patched (dirty). The Makefile +
+          # localversion files already contribute part of the string (here
+          # "4.19.325-cip128-st12"); setlocalversion would otherwise append the
+          # checkout's git sha and a "+" for the dirty tree. An empty .scmversion
+          # makes setlocalversion append nothing, so we measure the base release
+          # with LOCALVERSION empty, then set CONFIG_LOCALVERSION to exactly the
+          # remainder of the target (here "-g143e84087e21").
+          ./scripts/config --file .config --disable LOCALVERSION_AUTO \
+            --set-str LOCALVERSION "" --set-str SYSTEM_TRUSTED_KEYS ""
+          : > .scmversion
           make $MAKEVARS olddefconfig
+          base="$(make $MAKEVARS -s kernelrelease)"
+          echo "base kernelrelease: $base"
+          case "$TARGET_RELEASE" in
+            "$base"*) suffix="${TARGET_RELEASE#"$base"}" ;;
+            *) echo "::warning::target '$TARGET_RELEASE' does not start with base '$base' (source commit differs from firmware); leaving LOCALVERSION empty"
+               suffix="" ;;
+          esac
+          echo "computed LOCALVERSION suffix: '$suffix'"
+          ./scripts/config --file .config --set-str LOCALVERSION "$suffix"
+          make $MAKEVARS olddefconfig
+          rel="$(make $MAKEVARS -s kernelrelease)"
+          echo "final kernelrelease: $rel  (target: $TARGET_RELEASE)"
+          if [ "$rel" != "$TARGET_RELEASE" ]; then
+            echo "::warning::kernelrelease '$rel' != target '$TARGET_RELEASE' - vermagic will not match"
+          fi
           grep -E 'CONFIG_(LOCALVERSION=|LOCALVERSION_AUTO|MODVERSIONS|MODULE_SIG=)' .config || true
 
       - name: Build kernel Image and Module.symvers
