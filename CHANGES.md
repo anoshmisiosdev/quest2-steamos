@@ -2,6 +2,8 @@
 
 Changes made on the unlocked Quest 2 that still need to be brought over to the kexec setup (`pull/kexec/desk330-init.sh` + `q2boot.img`).
 
+**Payload extraction is now in-repo:** `image/tools/make_kexec_payload.py` (or `KEXEC=1 sh image/build.sh`) emits the raw `Image` + `initramfs` + kexec `cmdline` from a finished `boot_steamos.img` for quest-kexec's `prepare.py`. See [docs/KEXEC.md](docs/KEXEC.md). quest-kexec's staged-initrd window was grown 2 MiB → 48 MiB so the ~19–39 MiB SteamOS ramdisk fits (loader layout now `initrd 0x93000000`/48 MiB, `dtb 0x96000000`, top `0x96200000`; still inside clean Quest 2 System RAM, re-checked against the live map at stage/prep time). Remaining before it boots: rebuild `quest_kexec.ko` against the Quest 2 running kernel and shake out the display/GPU/USB hand-off on-device.
+
 ## Settings (files on the SteamOS root, no code change)
 
 - `/var/lib/q2/vrscale` = `1.0` — native VR render resolution (was 0.55).

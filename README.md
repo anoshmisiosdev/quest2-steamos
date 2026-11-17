@@ -61,6 +61,7 @@ Read these before flashing anything.
 | [docs/SETTINGS.md](docs/SETTINGS.md)               | Switches that turn features on and off without rebuilding                 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Getting logs, common problems, recovery                                   |
 | [docs/ROADMAP.md](docs/ROADMAP.md)                 | What comes next, including kexec for locked headsets                      |
+| [docs/KEXEC.md](docs/KEXEC.md)                     | Building the kexec payload for a locked headset and handing it to quest-kexec |
 | [docs/HISTORY.md](docs/HISTORY.md)                 | How the port got here                                                     |
 | [docs/DRM-MSM-PORT.md](docs/DRM-MSM-PORT.md)       | The GPU kernel driver: mainline drm/msm ported to the Quest 2 kernel      |
 

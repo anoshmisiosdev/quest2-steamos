@@ -105,3 +105,11 @@ SIZE=$(stat -c %s $OUT)
 echo "== result"
 sha256sum $OUT
 echo "done: $OUT - flash it to the boot partition only (never abl/xbl)"
+
+# KEXEC=1: also emit the loose payload (raw Image + initramfs + cmdline) for a
+# locked headset booted through quest-kexec instead of fastboot.  See docs/KEXEC.md.
+# Never fails the build: the initramfs-size check is advisory (exit 2) here.
+if [ -n "$KEXEC" ]; then
+  echo "== KEXEC=1: kexec payload (docs/KEXEC.md)"
+  python3 tools/make_kexec_payload.py "$OUT" -o out/kexec ${KEXEC_ROOTDEV:+--rootdev "$KEXEC_ROOTDEV"} || true
+fi

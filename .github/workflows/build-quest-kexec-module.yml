@@ -1,0 +1,210 @@
+name: build-quest-kexec-module
+
+# Builds quest-kexec's loader module (quest_kexec.ko + marker_read.ko, usb_log.ko)
+# against the STOCK Quest 2 Android kernel - the kernel that is RUNNING on the
+# headset and will load the module - not the SteamOS target kernel.
+#
+# For the module to insmod on a locked, rooted Quest OS it must match that
+# kernel's symbol CRCs and vermagic.  CRCs are deterministic from the exact
+# source commit + the device's own kernel config (CONFIG_MODVERSIONS=y on this
+# firmware), so this builds from:
+#   - the stock source commit embedded in `uname -r` (the -g<sha> suffix), and
+#   - config/stock-hollywood.config (captured from the device's /proc/config.gz),
+# with CONFIG_LOCALVERSION pinned so include/config/kernel.release reproduces
+# the firmware's `uname -r` exactly.
+#
+# The module SOURCE is fetched from the quest-kexec repo.  The grown-initrd-
+# window change (QKX_DTB/QKX_HI in module/loader.c) must be pushed to the ref
+# you point `kexec_ref` at, or the module built here will keep the old 2 MiB
+# window.  See docs/KEXEC.md.
+#
+# Output artifact: the .ko files + Module.symvers + the built kernel.release.
+# Loading it is Step 1 (staging-only, reversible) of the kexec bring-up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_release:
+        description: "firmware uname -r the module must match"
+        default: "4.19.325-cip128-st12-g143e84087e21"
+      kernel_repo:
+        description: "stock Quest 2 kernel source remote"
+        default: "https://github.com/facebookincubator/oculus-linux-kernel.git"
+      kernel_commit:
+        description: "stock source commit. For CRC-exact matching use your firmware's own -g<sha> (full 40-char sha, fetchable from GitHub). Default is the known-good quest2 master commit; vermagic is pinned regardless, and any CRC mismatch fails safely at insmod."
+        default: "6e428607392d72708bc95cb7126768494c6b5ac0"
+      kexec_repo:
+        description: "quest-kexec module source remote (fork carrying the grown-window change)"
+        default: "https://github.com/anoshmisiosdev/quest-kexec.git"
+      kexec_ref:
+        description: "quest-kexec ref that HAS the grown-window change (branch/tag/sha)"
+        default: "quest2-initrd-window"
+      apply_port_patches:
+        description: "apply scripts/kernel-patches.sh build fixes (needed to build the public source with this clang)"
+        default: "true"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MAKEVARS: ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- REAL_CC=clang
+      TARGET_RELEASE: ${{ inputs.target_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Runner image id
+        id: img
+        run: echo "id=${ImageOS:-unknown}-${ImageVersion:-0}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache apt packages
+        id: aptcache
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-q2-${{ steps.img.outputs.id }}-v2
+          restore-keys: apt-q2-
+
+      - name: Install build dependencies
+        run: |
+          mkdir -p ~/apt-cache/partial
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dir::Cache::archives="$HOME/apt-cache" \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu git curl cpio rsync kmod \
+            device-tree-compiler python3 dwarves zip file
+          sudo chown -R "$USER" ~/apt-cache || true
+
+      - name: Fetch stock Quest 2 kernel source
+        run: |
+          mkdir src && cd src
+          git init -q
+          git remote add origin "${{ inputs.kernel_repo }}"
+          # A bare sha is fetchable from GitHub; a branch/tag works too.
+          git fetch --depth 1 origin "${{ inputs.kernel_commit }}"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='source: %H %cd %s'
+
+      - name: Cache AOSP clang
+        id: clangcache
+        uses: actions/cache@v4
+        with:
+          path: toolchain/clang
+          key: clang-r450784e-v1
+
+      - name: Fetch clang r450784e (AOSP prebuilt)
+        if: steps.clangcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain/clang && cd toolchain
+          curl -fsSL -o clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz"
+          tar -xzf clang.tar.gz -C clang
+          rm clang.tar.gz
+
+      - name: Show clang version
+        run: ./toolchain/clang/bin/clang --version | head -n 1
+
+      - name: Apply source build fixes
+        if: ${{ inputs.apply_port_patches == 'true' }}
+        working-directory: src
+        run: bash ../scripts/kernel-patches.sh ..
+
+      - name: Configure with the STOCK device config, vermagic pinned
+        shell: bash
+        working-directory: src
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
+          cp ../config/stock-hollywood.config .config
+          # Pin the release string so include/config/kernel.release == the
+          # firmware's uname -r, independent of the CI checkout's git state.
+          base="${TARGET_RELEASE%%-*}"                 # 4.19.325
+          suffix="-${TARGET_RELEASE#*-}"               # -cip128-st12-g143e84087e21
+          echo "base=$base suffix=$suffix"
+          ./scripts/config --file .config --disable LOCALVERSION_AUTO --set-str LOCALVERSION "$suffix"
+          # No module signing key is enforced on this firmware.
+          ./scripts/config --file .config --set-str SYSTEM_TRUSTED_KEYS ""
+          make $MAKEVARS olddefconfig
+          grep -E 'CONFIG_(LOCALVERSION=|LOCALVERSION_AUTO|MODVERSIONS|MODULE_SIG=)' .config || true
+
+      - name: Build kernel Image and Module.symvers
+        shell: bash
+        working-directory: src
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
+          set +e
+          make $MAKEVARS -k -j"$(nproc)" Image 2>&1 | tee ../kernel-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" != 0 ]; then
+            echo "=================== UNIQUE ERRORS ==================="
+            grep -E "error:|\*\*\* \[|undefined reference|No such file" ../kernel-build.log | sort -u | head -80
+            exit 1
+          fi
+          make $MAKEVARS -j"$(nproc)" modules_prepare
+          # Module.symvers with vmlinux's symbol CRCs (CONFIG_MODVERSIONS), so
+          # the external module records the right versions.
+          ./scripts/mod/modpost -m -a -o Module.symvers vmlinux
+          rel="$(cat include/config/kernel.release)"
+          echo "built kernel.release: $rel"
+          echo "firmware target:      $TARGET_RELEASE"
+          if [ "$rel" != "$TARGET_RELEASE" ]; then
+            echo "::warning::kernel.release ($rel) != target ($TARGET_RELEASE); vermagic will not match - insmod will refuse unless forced"
+          fi
+          echo "vmlinux exports: $(wc -l < Module.symvers)"
+
+      - name: Fetch quest-kexec module source
+        run: |
+          git clone --depth 1 --branch "${{ inputs.kexec_ref }}" "${{ inputs.kexec_repo }}" qkx \
+            || git clone "${{ inputs.kexec_repo }}" qkx
+          cd qkx
+          git fetch --depth 1 origin "${{ inputs.kexec_ref }}" 2>/dev/null && git checkout -q FETCH_HEAD || true
+          git log -1 --format='module: %H %s'
+          echo "--- window in loader.c (expect QKX_HI 0x96200000, QKX_DTB 0x96000000) ---"
+          grep -E '#define QKX_(HI|DTB|INITRD|LO|ENTRY)' module/loader.c
+
+      - name: Build the loader module against the stock kernel
+        shell: bash
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
+          # KDIR = the in-tree built kernel dir (holds .config, vmlinux, Module.symvers).
+          # LOCALVERSION stays empty: the release string is already baked into .config.
+          make -C qkx/module KDIR="$GITHUB_WORKSPACE/src" LOCALVERSION="" \
+            2>&1 | tee module-build.log
+          echo "--- built modules ---"
+          find qkx/module -name '*.ko' -exec ls -l {} \;
+
+      - name: Verify vermagic and collect artifact
+        shell: bash
+        run: |
+          set -e
+          mkdir -p out
+          ok=1
+          for ko in $(find qkx/module -name '*.ko'); do
+            vm=$(modinfo -F vermagic "$ko" 2>/dev/null || true)
+            echo "$(basename "$ko"): vermagic = $vm"
+            case "$vm" in
+              "$TARGET_RELEASE "*) : ;;
+              *) echo "::warning::$(basename "$ko") vermagic '$vm' does not start with '$TARGET_RELEASE '"; ok=0 ;;
+            esac
+            cp "$ko" out/
+          done
+          cp src/Module.symvers out/ || true
+          cp src/include/config/kernel.release out/kernel.release || true
+          echo "vermagic_match=$ok" >> "$GITHUB_STEP_SUMMARY"
+          ls -l out
+          test -f out/quest_kexec.ko || { echo "quest_kexec.ko was not built"; exit 1; }
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quest-kexec-module
+          path: |
+            out/*.ko
+            out/Module.symvers
+            out/kernel.release
+            module-build.log

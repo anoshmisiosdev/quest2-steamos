@@ -15,7 +15,12 @@ The plan:
 3. Boot the SteamOS kernel and boot script through kexec instead of `fastboot flash boot`. The rest of the port stays the same.
 4. Add a "return to Quest OS" path, which is just a normal reboot.
 
-**What it still needs:** root access on Quest OS, to load a kernel module. On a locked headset that means a root method for the firmware version on the headset. Kexec removes the need to unlock the bootloader, not the need for root.
+**On this side it is wired up:** `image/tools/make_kexec_payload.py` (or `KEXEC=1 sh image/build.sh`) turns a finished `boot_steamos.img` into the loose `Image` + `initramfs` + `cmdline` that quest-kexec's `prepare.py` wants, from the same bytes the flashed path validates. See [docs/KEXEC.md](KEXEC.md) for the full hand-off.
+
+**What it still needs:**
+
+- **Root access on Quest OS**, to load the loader module. On a locked headset that means a root method for the firmware on the headset. Kexec removes the need to unlock the bootloader, not the need for root.
+- **A loader module built for the Quest 2 kernel.** quest-kexec's staged-initrd window has been grown from 2 MiB to 48 MiB so a full SteamOS ramdisk fits (see [docs/KEXEC.md](KEXEC.md)), but its `quest_kexec.ko` still has to be built against the Quest 2's exact running Android kernel and the hand-off hardware (display/GPU/USB) shaken out on the device.
 
 ## 2. A 72 Hz panel mode
 
