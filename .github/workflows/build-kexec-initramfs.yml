@@ -1,0 +1,52 @@
+name: build-kexec-initramfs
+
+# Builds quest-kexec's tiny RAM-only BusyBox initramfs (static ARM64 busybox +
+# init.sh with USB ethernet) for the first real kexec jump - the small,
+# recoverable target recommended before booting SteamOS. Output: initramfs.gz.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kexec_repo:
+        description: "quest-kexec source remote (fork with the grown-window change)"
+        default: "https://github.com/anoshmisiosdev/quest-kexec.git"
+      kexec_ref:
+        description: "quest-kexec ref"
+        default: "quest2-initrd-window"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential bc gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            curl bzip2 python3 make
+
+      - name: Fetch quest-kexec
+        run: |
+          git clone --depth 1 --branch "${{ inputs.kexec_ref }}" "${{ inputs.kexec_repo }}" qkx
+          cd qkx && git log -1 --format='%H %s'
+
+      - name: Build BusyBox RAM-only initramfs
+        working-directory: qkx
+        run: |
+          make initramfs
+          ls -l out/initramfs.gz
+          echo "size: $(wc -c < out/initramfs.gz) bytes"
+          # The staging window caps the initramfs at 48 MiB; busybox is far under.
+          python3 - <<'EOF'
+          import pathlib
+          n = pathlib.Path("qkx/out/initramfs.gz").stat().st_size if pathlib.Path("qkx/out/initramfs.gz").exists() else pathlib.Path("out/initramfs.gz").stat().st_size
+          print(f"initramfs.gz {n} bytes = {n/1048576:.2f} MiB (window 48 MiB)")
+          assert n < 48*1024*1024, "initramfs exceeds the staging window"
+          EOF
+
+      - name: Upload initramfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kexec-busybox-initramfs
+          path: qkx/out/initramfs.gz
